@@ -7,7 +7,6 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3003;
 const AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN;
-const FRONTEND_URL = process.env.FRONTEND_URL || '*';
 const TMP_DIR = path.join(__dirname, 'tmp');
 const MAX_SEGMENT_DURATION_SECONDS = 60 * 60;
 const DOWNLOAD_MARGIN_SEC = 15;
@@ -28,11 +27,16 @@ setInterval(() => {
     });
 }, 30 * 60 * 1000);
 
-app.use(cors({ origin: FRONTEND_URL, methods: ['GET'] }));
+app.use(cors({
+    origin: true,
+    methods: ['GET', 'OPTIONS'],
+    allowedHeaders: ['x-worker-token', 'Content-Type'],
+    credentials: false,
+}));
 
 function auth(req, res, next) {
     if (!AUTH_TOKEN) return next();
-    const token = req.headers['x-worker-token'];
+    const token = req.headers['x-worker-token'] || req.query.token;
     if (token !== AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
     next();
 }
@@ -75,6 +79,9 @@ app.get('/clip/:clipSlug', auth, (req, res) => {
     const ytdlp = spawn('yt-dlp', [
         '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         '--merge-output-format', 'mp4',
+        '--retries', '10',
+        '--fragment-retries', '10',
+        '--retry-sleep', '3',
         '-o', outPath,
         '--no-playlist',
         `https://clips.twitch.tv/${clipSlug}`,
@@ -126,6 +133,9 @@ app.get('/segment', auth, (req, res) => {
         '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         '--merge-output-format', 'mp4',
         '--download-sections', section,
+        '--retries', '10',
+        '--fragment-retries', '10',
+        '--retry-sleep', '3',
         '-o', rawPath,
         '--no-playlist',
         `https://www.twitch.tv/videos/${vodId}`,
