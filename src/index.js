@@ -191,6 +191,9 @@ app.get('/segment', auth, async (req, res) => {
         return res.status(400).json({ error: 'Segment too long (max 1h)' });
     }
 
+    const tsPath  = path.join(TMP_DIR, `seg_${vodId}_${Date.now()}.ts`);
+    const mp4Path = tsPath.replace('.ts', '.mp4');
+
     try {
         const m3u8Url = await getM3u8Url(vodId);
         const segments = await getSegmentsInRange(m3u8Url, fromSec, toSec);
@@ -200,17 +203,36 @@ app.get('/segment', auth, async (req, res) => {
         }
 
         const buffers = await downloadSegmentsConcurrent(segments, 8);
-        const totalSize = buffers.reduce((acc, b) => acc + b.length, 0);
 
-        const filename = `${vodId}_${from.replace(/:/g, '')}-${to.replace(/:/g, '')}.ts`;
-        res.setHeader('Content-Type', 'video/mp2t');
+        const tsStream = fs.createWriteStream(tsPath);
+        for (const buf of buffers) tsStream.write(buf);
+        await new Promise((resolve, reject) => {
+            tsStream.end();
+            tsStream.on('finish', resolve);
+            tsStream.on('error', reject);
+        });
+
+        await new Promise((resolve, reject) => {
+            const ff = spawn('ffmpeg', [
+                '-y', '-i', tsPath,
+                '-c', 'copy',
+                '-movflags', '+faststart',
+                mp4Path,
+            ]);
+            ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));
+        });
+
+        fs.unlink(tsPath, () => {});
+
+        const filename = `${vodId}_${from.replace(/:/g, '')}-${to.replace(/:/g, '')}.mp4`;
+        res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        res.setHeader('Content-Length', totalSize);
-
-        for (const buf of buffers) res.write(buf);
-        res.end();
+        res.setHeader('Content-Length', fs.statSync(mp4Path).size);
+        streamFile(res, mp4Path, [mp4Path]);
 
     } catch (e) {
+        fs.unlink(tsPath, () => {});
+        fs.unlink(mp4Path, () => {});
         if (!res.headersSent) res.status(500).json({ error: e.message });
     }
 });
