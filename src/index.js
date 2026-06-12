@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const https = require('https');
+const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -8,8 +10,6 @@ const app = express();
 const PORT = process.env.PORT || 3003;
 const AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN;
 const TMP_DIR = path.join(__dirname, 'tmp');
-const MAX_SEGMENT_DURATION_SECONDS = 60 * 60;
-const DOWNLOAD_MARGIN_SEC = 15;
 
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
@@ -49,14 +49,7 @@ function parseTimestamp(ts) {
     return h * 3600 + m * 60 + s;
 }
 
-function formatTimestamp(seconds) {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-function streamFile(res, filePath, filename, cleanup = []) {
+function streamFile(res, filePath, cleanup = []) {
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
     stream.on('close', () => cleanup.forEach((f) => fs.unlink(f, () => {})));
@@ -64,6 +57,84 @@ function streamFile(res, filePath, filename, cleanup = []) {
         cleanup.forEach((f) => fs.unlink(f, () => {}));
         if (!res.headersSent) res.status(500).json({ error: 'Stream error' });
     });
+}
+
+function fetchBuffer(url) {
+    return new Promise((resolve, reject) => {
+        const lib = url.startsWith('https') ? https : http;
+        lib.get(url, (res) => {
+            if (res.statusCode === 301 || res.statusCode === 302) {
+                return fetchBuffer(res.headers.location).then(resolve).catch(reject);
+            }
+            if (res.statusCode !== 200) {
+                const chunks = [];
+                res.on('data', c => chunks.push(c));
+                res.on('end', () => reject(new Error(`HTTP ${res.statusCode}`)));
+                return;
+            }
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+        }).on('error', reject);
+    });
+}
+
+function fetchText(url) {
+    return fetchBuffer(url).then(b => b.toString('utf8'));
+}
+
+function getM3u8Url(vodId) {
+    return new Promise((resolve, reject) => {
+        const ytdlp = spawn('yt-dlp', [
+            '--get-url',
+            '-f', 'bestvideo[ext=mp4]/best[ext=mp4]/best',
+            `https://www.twitch.tv/videos/${vodId}`,
+        ]);
+        let url = '';
+        let stderr = '';
+        ytdlp.stdout.on('data', d => { url += d.toString().trim(); });
+        ytdlp.stderr.on('data', d => { stderr += d.toString(); });
+        ytdlp.on('close', code => {
+            if (code !== 0 || !url) return reject(new Error(`yt-dlp failed: ${stderr.substring(0, 100)}`));
+            resolve(url.trim());
+        });
+    });
+}
+
+async function getSegmentsInRange(m3u8Url, fromSec, toSec) {
+    const m3u8 = await fetchText(m3u8Url);
+    const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
+    const lines = m3u8.split('\n');
+    const segments = [];
+    let currentTime = 0;
+    let segDuration = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('#EXTINF:')) {
+            segDuration = parseFloat(line.replace('#EXTINF:', '').split(',')[0]);
+        } else if (line && !line.startsWith('#')) {
+            const segStart = currentTime;
+            const segEnd = currentTime + segDuration;
+            if (segEnd > fromSec && segStart < toSec) {
+                const url = line.startsWith('http') ? line : baseUrl + line;
+                segments.push({ url, start: segStart, end: segEnd });
+            }
+            currentTime += segDuration;
+            segDuration = 0;
+        }
+    }
+    return segments;
+}
+
+async function downloadSegmentsConcurrent(segments, concurrency = 8) {
+    const buffers = new Array(segments.length);
+    for (let i = 0; i < segments.length; i += concurrency) {
+        const batch = segments.slice(i, i + concurrency);
+        const results = await Promise.all(batch.map(seg => fetchBuffer(seg.url)));
+        results.forEach((buf, j) => { buffers[i + j] = buf; });
+    }
+    return buffers;
 }
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -96,11 +167,11 @@ app.get('/clip/:clipSlug', auth, (req, res) => {
         }
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Disposition', `attachment; filename="${clipSlug}.mp4"`);
-        streamFile(res, outPath, `${clipSlug}.mp4`, [outPath]);
+        streamFile(res, outPath, [outPath]);
     });
 });
 
-app.get('/segment', auth, (req, res) => {
+app.get('/segment', auth, async (req, res) => {
     const { vodId, from, to } = req.query;
 
     if (!vodId || !/^\d+$/.test(vodId)) {
@@ -111,74 +182,37 @@ app.get('/segment', auth, (req, res) => {
     const toSec = parseTimestamp(to);
 
     if (fromSec === null || toSec === null) {
-        return res.status(400).json({ error: 'Invalid timestamps. Use HH:MM:SS format' });
+        return res.status(400).json({ error: 'Invalid timestamps' });
     }
     if (toSec <= fromSec) {
         return res.status(400).json({ error: 'to must be after from' });
     }
-    if (toSec - fromSec > MAX_SEGMENT_DURATION_SECONDS) {
+    if (toSec - fromSec > 3600) {
         return res.status(400).json({ error: 'Segment too long (max 1h)' });
     }
 
-    const ts = Date.now();
-    const rawPath = path.join(TMP_DIR, `seg_${vodId}_${ts}_raw.mp4`);
-    const outPath = path.join(TMP_DIR, `seg_${vodId}_${ts}.mp4`);
-    const duration = toSec - fromSec;
-    const downloadFrom = Math.max(0, fromSec - DOWNLOAD_MARGIN_SEC);
-    const section = `*${formatTimestamp(downloadFrom)}-${formatTimestamp(toSec)}`;
+    try {
+        const m3u8Url = await getM3u8Url(vodId);
+        const segments = await getSegmentsInRange(m3u8Url, fromSec, toSec);
 
-    let actualFromSec = null;
-
-    const ytdlp = spawn('yt-dlp', [
-        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        '--merge-output-format', 'mp4',
-        '--download-sections', section,
-        '--retries', '10',
-        '--fragment-retries', '10',
-        '--retry-sleep', '3',
-        '-o', rawPath,
-        '--no-playlist',
-        `https://www.twitch.tv/videos/${vodId}`,
-    ]);
-
-    ytdlp.stdout.on('data', (d) => {
-        const match = d.toString().match(/Downloading \d+ time ranges?: ([\d.]+)-[\d.]+/);
-        if (match) actualFromSec = parseFloat(match[1]);
-    });
-    ytdlp.stderr.on('data', () => {});
-
-    ytdlp.on('close', (code) => {
-        if (code !== 0 || !fs.existsSync(rawPath)) {
-            return res.status(500).json({ error: 'Download failed' });
+        if (segments.length === 0) {
+            return res.status(404).json({ error: 'No segments in range' });
         }
 
-        const rawStart = actualFromSec ?? downloadFrom;
-        const skipSec = Math.max(0, fromSec - rawStart);
+        const buffers = await downloadSegmentsConcurrent(segments, 8);
+        const totalSize = buffers.reduce((acc, b) => acc + b.length, 0);
 
-        const args = ['-y'];
-        if (skipSec > 0.01) args.push('-ss', skipSec.toFixed(3));
-        args.push(
-            '-i', rawPath,
-            '-t', duration.toFixed(3),
-            '-c', 'copy',
-            '-avoid_negative_ts', 'make_zero',
-            outPath,
-        );
+        const filename = `${vodId}_${from.replace(/:/g, '')}-${to.replace(/:/g, '')}.ts`;
+        res.setHeader('Content-Type', 'video/mp2t');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Length', totalSize);
 
-        const ffmpeg = spawn('ffmpeg', args);
-        ffmpeg.stderr.on('data', () => {});
+        for (const buf of buffers) res.write(buf);
+        res.end();
 
-        ffmpeg.on('close', (ffCode) => {
-            fs.unlink(rawPath, () => {});
-            if (ffCode !== 0 || !fs.existsSync(outPath)) {
-                return res.status(500).json({ error: 'Processing failed' });
-            }
-            const filename = `vod${vodId}_${from.replace(/:/g, '')}-${to.replace(/:/g, '')}.mp4`;
-            res.setHeader('Content-Type', 'video/mp4');
-            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-            streamFile(res, outPath, filename, [outPath]);
-        });
-    });
+    } catch (e) {
+        if (!res.headersSent) res.status(500).json({ error: e.message });
+    }
 });
 
 app.listen(PORT, () => {
