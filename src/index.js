@@ -95,7 +95,10 @@ function getM3u8Url(vodId) {
         ytdlp.stdout.on('data', d => { url += d.toString().trim(); });
         ytdlp.stderr.on('data', d => { stderr += d.toString(); });
         ytdlp.on('close', code => {
-            if (code !== 0 || !url) return reject(new Error(`yt-dlp failed: ${stderr.substring(0, 100)}`));
+            if (code !== 0 || !url) {
+                console.error('[yt-dlp error]', stderr);
+                return reject(new Error(`yt-dlp failed: ${stderr.substring(0, 300)}`));
+            }
             resolve(url.trim());
         });
     });
@@ -125,16 +128,6 @@ async function getSegmentsInRange(m3u8Url, fromSec, toSec) {
         }
     }
     return segments;
-}
-
-async function downloadSegmentsConcurrent(segments, concurrency = 8) {
-    const buffers = new Array(segments.length);
-    for (let i = 0; i < segments.length; i += concurrency) {
-        const batch = segments.slice(i, i + concurrency);
-        const results = await Promise.all(batch.map(seg => fetchBuffer(seg.url)));
-        results.forEach((buf, j) => { buffers[i + j] = buf; });
-    }
-    return buffers;
 }
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -202,10 +195,12 @@ app.get('/segment', auth, async (req, res) => {
             return res.status(404).json({ error: 'No segments in range' });
         }
 
-        const buffers = await downloadSegmentsConcurrent(segments, 8);
-
         const tsStream = fs.createWriteStream(tsPath);
-        for (const buf of buffers) tsStream.write(buf);
+        for (let i = 0; i < segments.length; i += 8) {
+            const batch = segments.slice(i, i + 8);
+            const bufs = await Promise.all(batch.map(seg => fetchBuffer(seg.url)));
+            for (const buf of bufs) tsStream.write(buf);
+        }
         await new Promise((resolve, reject) => {
             tsStream.end();
             tsStream.on('finish', resolve);
@@ -231,6 +226,8 @@ app.get('/segment', auth, async (req, res) => {
         streamFile(res, mp4Path, [mp4Path]);
 
     } catch (e) {
+        console.error('[segment error]', e.message);
+        console.error(e.stack);
         fs.unlink(tsPath, () => {});
         fs.unlink(mp4Path, () => {});
         if (!res.headersSent) res.status(500).json({ error: e.message });
