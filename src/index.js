@@ -180,9 +180,9 @@ app.get('/segment', auth, async (req, res) => {
     if (toSec <= fromSec) {
         return res.status(400).json({ error: 'to must be after from' });
     }
-    if (toSec - fromSec > 3600) {
-        return res.status(400).json({ error: 'Segment too long (max 1h)' });
-    }
+    // if (toSec - fromSec > 3600) {
+    //     return res.status(400).json({ error: 'Segment too long (max 1h)' });
+    // }
 
     const tsPath  = path.join(TMP_DIR, `seg_${vodId}_${Date.now()}.ts`);
     const mp4Path = tsPath.replace('.ts', '.mp4');
