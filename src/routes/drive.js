@@ -165,9 +165,16 @@ router.post('/import-folder', express.json(), checkQuota, (req, res) => {
 
     const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
-    const gdown = spawn('/home/clip-worker/venv/bin/gdown', [
+    const gdown = spawn('/home/clip-worker/venv/bin/python3', [
+        '-m', 'gdown',
         '--folder', url, '-O', destPath,
-    ]);
+    ], {
+        env: {
+            ...process.env,
+            PATH: `/home/clip-worker/venv/bin:${process.env.PATH}`,
+            VIRTUAL_ENV: '/home/clip-worker/venv',
+        }
+    });
 
     gdown.stdout.on('data', data => {
         const msg = data.toString().trim();
