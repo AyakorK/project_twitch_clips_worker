@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const { spawn } = require('child_process');
 const { STORAGE_DIR, STORAGE_LIMIT_BYTES, getQuota, safePath, listDir } = require('../lib/storage');
 
 const router = express.Router();
@@ -39,10 +40,8 @@ function checkQuota(req, res, next) {
 
 const upload = multer({ storage, limits: { fileSize: STORAGE_LIMIT_BYTES } });
 
-// GET /drive/quota
 router.get('/quota', (req, res) => res.json(getQuota()));
 
-// GET /drive/list?path=
 router.get('/list', (req, res) => {
     const relPath = (req.query.path || '').replace(/^\/+/, '');
     try {
@@ -53,7 +52,6 @@ router.get('/list', (req, res) => {
     }
 });
 
-// POST /drive/folder?path=&name=
 router.post('/folder', (req, res) => {
     const parent = (req.query.path || '').replace(/^\/+/, '');
     const name = (req.query.name || '').replace(/[^a-zA-Z0-9._\-\s]/g, '_').trim();
@@ -68,7 +66,6 @@ router.post('/folder', (req, res) => {
     }
 });
 
-// DELETE /drive/folder?path=
 router.delete('/folder', (req, res) => {
     const relPath = (req.query.path || '').replace(/^\/+/, '');
     if (!relPath) return res.status(400).json({ error: 'Missing path' });
@@ -82,7 +79,6 @@ router.delete('/folder', (req, res) => {
     }
 });
 
-// POST /drive/upload?folder=
 router.post('/upload', checkQuota, upload.array('files', 20), (req, res) => {
     if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
     const folder = req.query.folder || '';
@@ -93,7 +89,6 @@ router.post('/upload', checkQuota, upload.array('files', 20), (req, res) => {
     res.json({ success: true, files: uploaded, quota: getQuota() });
 });
 
-// POST /drive/import
 router.post('/import', checkQuota, express.json(), async (req, res) => {
     let { url, folder = '', filename } = req.body || {};
     if (!url) return res.status(400).json({ error: 'Missing url' });
@@ -147,7 +142,62 @@ router.post('/import', checkQuota, express.json(), async (req, res) => {
     download(url);
 });
 
-// GET /drive/file?path= — force download
+router.post('/import-folder', express.json(), checkQuota, (req, res) => {
+    const { url, destination = '' } = req.body || {};
+    if (!url) return res.status(400).json({ error: 'Missing url' });
+
+    const folderMatch = url.match(/folders\/([a-zA-Z0-9_-]+)/);
+    if (!folderMatch) return res.status(400).json({ error: 'URL Google Drive invalide — doit contenir /folders/ID' });
+
+    let destPath;
+    try {
+        destPath = safePath(destination);
+        fs.mkdirSync(destPath, { recursive: true });
+    } catch (e) {
+        return res.status(400).json({ error: e.message });
+    }
+
+    // SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+    const gdown = spawn('/home/clip-worker/venv/bin/gdown', [
+        '--folder', url, '-O', destPath,
+    ]);
+
+    gdown.stdout.on('data', data => {
+        const msg = data.toString().trim();
+        if (msg) send({ type: 'log', message: msg });
+    });
+
+    gdown.stderr.on('data', data => {
+        const msg = data.toString().trim();
+        if (msg) send({ type: 'log', message: msg });
+    });
+
+    gdown.on('close', code => {
+        if (code === 0) {
+            send({ type: 'done', quota: getQuota() });
+        } else {
+            send({ type: 'error', message: `gdown s'est arrêté avec le code ${code}` });
+        }
+        res.end();
+    });
+
+    gdown.on('error', err => {
+        send({ type: 'error', message: err.message });
+        res.end();
+    });
+
+    req.on('close', () => {
+        try { gdown.kill(); } catch {}
+    });
+});
+
 router.get('/file', (req, res) => {
     const relPath = (req.query.path || '').replace(/^\/+/, '');
     if (!relPath) return res.status(400).json({ error: 'Missing path' });
@@ -165,7 +215,6 @@ router.get('/file', (req, res) => {
     }
 });
 
-// GET /drive/preview?path= — inline streaming with range support
 router.get('/preview', (req, res) => {
     const relPath = (req.query.path || '').replace(/^\/+/, '');
     if (!relPath) return res.status(400).json({ error: 'Missing path' });
@@ -202,7 +251,6 @@ router.get('/preview', (req, res) => {
     }
 });
 
-// DELETE /drive/file?path=
 router.delete('/file', (req, res) => {
     const relPath = (req.query.path || '').replace(/^\/+/, '');
     if (!relPath) return res.status(400).json({ error: 'Missing path' });
@@ -216,7 +264,6 @@ router.delete('/file', (req, res) => {
     }
 });
 
-// PATCH /drive/rename?path=&name=
 router.patch('/rename', express.json(), (req, res) => {
     const relPath = (req.query.path || '').replace(/^\/+/, '');
     const newName = (req.query.name || '').replace(/[^a-zA-Z0-9._\-\s]/g, '_').trim();
