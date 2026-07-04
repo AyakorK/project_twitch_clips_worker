@@ -165,6 +165,8 @@ router.post('/import-folder', express.json(), checkQuota, (req, res) => {
 
     const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
+    send({ type: 'log', message `Lancement gdown: ${url} vers ${destPath}` });
+
     const gdown = spawn('/home/clip-worker/venv/bin/gdown', [
 
         '--folder', url, '-O', destPath,
