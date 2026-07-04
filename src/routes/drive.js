@@ -165,13 +165,15 @@ router.post('/import-folder', express.json(), checkQuota, (req, res) => {
 
     const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
-    const gdown = spawn('/home/clip-worker/venv/bin/python3', [
-        '-m', 'gdown',
+    const gdown = spawn('/home/clip-worker/venv/bin/gdown', [
+
         '--folder', url, '-O', destPath,
     ], {
         env: {
             ...process.env,
-            PATH: `/home/clip-worker/venv/bin:${process.env.PATH}`,
+            PATH: `/home/clip-worker/venv/bin:/usr/local/bin:/usr/bin:/bin`,
+            PYTHONPATH: '/home/clip-worker/venv/lib/python3.14/site-packages',
+            HOME: '/root',
             VIRTUAL_ENV: '/home/clip-worker/venv',
         }
     });
