@@ -46,8 +46,8 @@ router.get('/:clipSlug/vertical', (req, res) => {
         }
 
         const filter =
-            `[0:v]crop=iw*${w}:ih*${h}:iw*${x}:ih*${y},scale=1080:608:force_original_aspect_ratio=increase,crop=1080:608[cam];` +
-            `[0:v]scale=1080:1312:force_original_aspect_ratio=increase,crop=1080:1312[game];` +
+            `[0:v]crop=iw*${w}:ih*${h}:iw*${x}:ih*${y},scale=720:404:force_original_aspect_ratio=increase,crop=720:404[cam];` +
+            `[0:v]scale=720:876:force_original_aspect_ratio=increase,crop=720:876[game];` +
             `[cam][game]vstack=inputs=2[out]`;
 
         const ff = spawn('ffmpeg', [
