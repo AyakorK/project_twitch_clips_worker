@@ -24,11 +24,13 @@ require('./lib/fs');
 const clipsRouter = require('./routes/clips');
 const segmentsRouter = require('./routes/segments');
 const driveRouter = require('./routes/drive');
+const verticalRouter = require('./routes/vertical');
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/clip', auth, clipsRouter);
 app.use('/segment', auth, segmentsRouter);
 app.use('/drive', auth, driveRouter);
+app.use('/clip', auth, verticalRouter());
 
 app.listen(PORT, () => {
     console.log(`Worker running on port ${PORT}`);
