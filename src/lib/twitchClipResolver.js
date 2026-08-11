@@ -49,6 +49,11 @@ async function resolveClipVideoUrl(clipSlug) {
         throw new Error(`GraphQL resolve failed: ${err}`);
     }
 
+    const token = clip.playbackAccessToken;
+    if (!token?.signature || !token?.value) {
+        throw new Error('no playbackAccessToken in clip response');
+    }
+
     const qualities = clip.videoQualities || [];
     if (qualities.length === 0) {
         throw new Error('no video qualities in clip response');
@@ -58,7 +63,10 @@ async function resolveClipVideoUrl(clipSlug) {
         (parseInt(b.quality, 10) || 0) > (parseInt(a.quality, 10) || 0) ? b : a
     );
 
-    return best.sourceURL;
+    const authorizedUrl =
+        `${best.sourceURL}?sig=${token.signature}&token=${encodeURIComponent(token.value)}`;
+
+    return authorizedUrl;
 }
 
 function downloadFile(url, outPath) {
