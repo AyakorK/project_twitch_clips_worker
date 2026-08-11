@@ -3,6 +3,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const { tmpPath, streamFile } = require('../lib/fs');
+const { downloadClipWithAutoHeal } = require('../lib/twitchAutoHeal');
 
 const router = express.Router();
 const jobs = new Map();
@@ -45,38 +46,20 @@ router.post('/:clipSlug/vertical/start', express.json(), (req, res) => {
     jobs.set(jobId, { status: 'downloading', progress: 0, outPath: null, error: null });
     res.json({ jobId });
 
-    const ytdlp = spawn('yt-dlp', [
-        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        '--merge-output-format', 'mp4',
-        '--retries', '10',
-        '--fragment-retries', '10',
-        '--retry-sleep', '3',
-        '-o', rawPath,
-        '--no-playlist',
-        `https://clips.twitch.tv/${clipSlug}`,
-    ]);
-
-    let ytdlpStderr = '';
-    ytdlp.stderr.on('data', d => { ytdlpStderr += d.toString(); });
-
-    ytdlp.stdout.on('data', d => {
-        const match = d.toString().match(/(\d+(?:\.\d+)?)%/);
-        if (match) {
-            const job = jobs.get(jobId);
-            if (job) job.progress = Math.min(20, Math.round(parseFloat(match[1]) * 0.2));
-        }
-    });
-
-    ytdlp.on('close', code => {
+    (async () => {
         const job = jobs.get(jobId);
-        if (!job) return;
+        const result = await downloadClipWithAutoHeal(clipSlug, rawPath);
 
-        if (code !== 0 || !fs.existsSync(rawPath)) {
-            console.error('[vertical yt-dlp error]', ytdlpStderr.slice(-500));
+        if (!result.success) {
+            console.error('[vertical yt-dlp error]', result.stderr ? result.stderr.slice(-500) : result.detail);
             job.status = 'error';
-            job.error = 'Download failed';
+            job.error = result.error;
             cleanupJob(jobId);
             return;
+        }
+
+        if (result.healed) {
+            console.warn(`[vertical] auto-heal succeeded via: ${result.healed}`);
         }
 
         job.status = 'encoding';
@@ -132,7 +115,7 @@ router.post('/:clipSlug/vertical/start', express.json(), (req, res) => {
             j.outPath = outPath;
             cleanupJob(jobId);
         });
-    });
+    })();
 });
 
 router.get('/vertical/progress/:jobId', (req, res) => {
