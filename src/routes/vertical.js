@@ -56,6 +56,9 @@ router.post('/:clipSlug/vertical/start', express.json(), (req, res) => {
         `https://clips.twitch.tv/${clipSlug}`,
     ]);
 
+    let ytdlpStderr = '';
+    ytdlp.stderr.on('data', d => { ytdlpStderr += d.toString(); });
+
     ytdlp.stdout.on('data', d => {
         const match = d.toString().match(/(\d+(?:\.\d+)?)%/);
         if (match) {
@@ -69,6 +72,7 @@ router.post('/:clipSlug/vertical/start', express.json(), (req, res) => {
         if (!job) return;
 
         if (code !== 0 || !fs.existsSync(rawPath)) {
+            console.error('[vertical yt-dlp error]', ytdlpStderr.slice(-500));
             job.status = 'error';
             job.error = 'Download failed';
             cleanupJob(jobId);
